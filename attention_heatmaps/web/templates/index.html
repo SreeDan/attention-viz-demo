@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VizFold – Attention Head Explorer · {{ protein }}</title>
+  <link rel="stylesheet" href="/static/css/style.css" />
+</head>
+<body>
+
+<header>
+  <h1>VizFold · Attention Head Explorer</h1>
+  <span class="protein-badge">{{ protein }}</span>
+</header>
+
+<main>
+  <!-- ===== Controls panel ===== -->
+  <aside id="controls">
+    <h2>Settings</h2>
+
+    <label>Attention type
+      <select id="attn_type">
+        <option value="msa_row">MSA Row</option>
+        <option value="triangle_start">Triangle Start</option>
+      </select>
+    </label>
+
+    <label>Layer
+      <select id="layer"></select>
+    </label>
+
+    <div id="residue_row" style="display:none">
+      <label>Residue index
+        <input type="number" id="residue" value="0" min="0" />
+      </label>
+    </div>
+
+    <hr />
+
+    <label>View
+      <select id="mode">
+        <option value="grid">Small multiples (all heads)</option>
+        <option value="agg">Aggregated heatmap</option>
+      </select>
+    </label>
+
+    <div id="grid_opts">
+      <label>Columns
+        <input type="number" id="cols" value="4" min="1" max="8" />
+      </label>
+
+      <label>Normalization
+        <select id="norm">
+          <option value="global_max">Global max</option>
+          <option value="row_softmax">Row softmax</option>
+          <option value="none">None</option>
+        </select>
+      </label>
+
+      <label>Threshold (percentile of non-zero)
+        <input type="range" id="threshold_pct" min="0" max="95" step="5" value="0" />
+        <output id="threshold_out">0</output>
+      </label>
+    </div>
+
+    <div id="agg_opts" style="display:none">
+      <label>Aggregation
+        <select id="agg">
+          <option value="mean">Mean</option>
+          <option value="max">Max</option>
+          <option value="std">Std-dev (head specialisation)</option>
+        </select>
+      </label>
+    </div>
+
+    <label>Colormap
+      <select id="cmap">
+        <option value="viridis">viridis</option>
+        <option value="magma">magma</option>
+        <option value="plasma">plasma</option>
+        <option value="Blues">Blues</option>
+        <option value="YlOrRd">YlOrRd</option>
+      </select>
+    </label>
+
+    <label>Highlight residue (optional)
+      <input type="number" id="highlight_residue" placeholder="none" min="0" />
+    </label>
+
+    <button id="btn_render">Render</button>
+    <a id="download_link" style="display:none" download>⬇ Download PNG</a>
+  </aside>
+
+  <!-- ===== Main content area ===== -->
+  <section id="content">
+    <div id="img_container">
+      <p class="placeholder">Configure settings and press <strong>Render</strong>.</p>
+      <img id="heatmap_img" src="" alt="Attention heatmap" style="display:none" />
+    </div>
+
+    <div id="metrics_section">
+      <h2>Head metrics <span id="metrics_layer_label"></span></h2>
+      <p class="hint">Click a column header to sort.</p>
+      <div id="metrics_table_wrap">
+        <table id="metrics_table">
+          <thead>
+            <tr>
+              <th data-col="head">Head</th>
+              <th data-col="entropy">Entropy ↑ = diffuse</th>
+              <th data-col="sparsity">Sparsity ↑ = sparse</th>
+              <th data-col="diagonal_concentration">Diag conc ↑ = local</th>
+              <th data-col="mean_attention_distance">Mean dist ↑ = long-range</th>
+              <th data-col="max_weight">Max weight</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script>
+  /* ---- Layer data injected from server ---- */
+  const LAYERS_DATA = {{ layers_json | safe }};
+  const DEFAULT_LAYER = {{ default_layer }};
+
+  const selAttnType  = document.getElementById("attn_type");
+  const selLayer     = document.getElementById("layer");
+  const residueRow   = document.getElementById("residue_row");
+  const inpResidue   = document.getElementById("residue");
+  const selMode      = document.getElementById("mode");
+  const gridOpts     = document.getElementById("grid_opts");
+  const aggOpts      = document.getElementById("agg_opts");
+  const inpCols      = document.getElementById("cols");
+  const selNorm      = document.getElementById("norm");
+  const inpThresh    = document.getElementById("threshold_pct");
+  const outThresh    = document.getElementById("threshold_out");
+  const selAgg       = document.getElementById("agg");
+  const selCmap      = document.getElementById("cmap");
+  const inpHighlight = document.getElementById("highlight_residue");
+  const btnRender    = document.getElementById("btn_render");
+  const dlLink       = document.getElementById("download_link");
+  const img          = document.getElementById("heatmap_img");
+  const placeholder  = document.querySelector(".placeholder");
+  const metricsLabel = document.getElementById("metrics_layer_label");
+  const tbody        = document.querySelector("#metrics_table tbody");
+
+  /* ---- Populate layer dropdown ---- */
+  function populateLayers() {
+    const attnType = selAttnType.value;
+    const available = LAYERS_DATA[attnType] || [];
+    selLayer.innerHTML = "";
+    available.forEach(l => {
+      const opt = document.createElement("option");
+      opt.value = l;
+      opt.textContent = `Layer ${l}`;
+      if (l === DEFAULT_LAYER) opt.selected = true;
+      selLayer.appendChild(opt);
+    });
+    residueRow.style.display = attnType === "triangle_start" ? "" : "none";
+  }
+
+  selAttnType.addEventListener("change", populateLayers);
+  populateLayers();
+
+  /* ---- Toggle grid/agg options ---- */
+  selMode.addEventListener("change", () => {
+    const isGrid = selMode.value === "grid";
+    gridOpts.style.display = isGrid ? "" : "none";
+    aggOpts.style.display  = isGrid ? "none" : "";
+  });
+
+  inpThresh.addEventListener("input", () => { outThresh.textContent = inpThresh.value; });
+
+  /* ---- Build query string ---- */
+  function buildQuery() {
+    const p = new URLSearchParams({
+      attn_type: selAttnType.value,
+      layer: selLayer.value,
+      mode: selMode.value,
+      agg: selAgg.value,
+      norm: selNorm.value,
+      threshold_pct: inpThresh.value,
+      cols: inpCols.value,
+      cmap: selCmap.value,
+    });
+    if (selAttnType.value === "triangle_start") p.set("residue", inpResidue.value);
+    if (inpHighlight.value.trim() !== "") p.set("highlight_residue", inpHighlight.value.trim());
+    return p.toString();
+  }
+
+  /* ---- Render button ---- */
+  btnRender.addEventListener("click", async () => {
+    btnRender.textContent = "Rendering…";
+    btnRender.disabled = true;
+    placeholder.style.display = "none";
+    img.style.display = "none";
+    dlLink.style.display = "none";
+
+    const qs = buildQuery();
+    const url = `/api/heatmap?${qs}&ts=${Date.now()}`;
+
+    img.onload = () => {
+      img.style.display = "block";
+      dlLink.href = url;
+      dlLink.style.display = "inline-block";
+      btnRender.textContent = "Render";
+      btnRender.disabled = false;
+    };
+    img.onerror = () => {
+      placeholder.textContent = "Error: could not load image. Check server logs.";
+      placeholder.style.display = "block";
+      btnRender.textContent = "Render";
+      btnRender.disabled = false;
+    };
+    img.src = url;
+
+    // Load metrics in parallel
+    loadMetrics();
+  });
+
+  /* ---- Metrics table ---- */
+  let sortCol = "head", sortAsc = true;
+
+  async function loadMetrics() {
+    const p = new URLSearchParams({ attn_type: selAttnType.value, layer: selLayer.value });
+    if (selAttnType.value === "triangle_start") p.set("residue", inpResidue.value);
+    metricsLabel.textContent = `(${selAttnType.value}, Layer ${selLayer.value})`;
+
+    const res = await fetch(`/api/metrics?${p}`);
+    if (!res.ok) return;
+    const rows = await res.json();
+    window._metricsData = rows;
+    renderTable(rows);
+  }
+
+  function renderTable(rows) {
+    const sorted = [...rows].sort((a, b) => {
+      const va = a[sortCol], vb = b[sortCol];
+      return sortAsc ? (va > vb ? 1 : -1) : (va < vb ? 1 : -1);
+    });
+    tbody.innerHTML = sorted.map(r => `
+      <tr>
+        <td>${r.head}</td>
+        <td>${r.entropy}</td>
+        <td>${r.sparsity}</td>
+        <td>${r.diagonal_concentration}</td>
+        <td>${r.mean_attention_distance}</td>
+        <td>${r.max_weight}</td>
+      </tr>`).join("");
+  }
+
+  document.querySelectorAll("#metrics_table th[data-col]").forEach(th => {
+    th.style.cursor = "pointer";
+    th.addEventListener("click", () => {
+      if (sortCol === th.dataset.col) sortAsc = !sortAsc;
+      else { sortCol = th.dataset.col; sortAsc = true; }
+      if (window._metricsData) renderTable(window._metricsData);
+    });
+  });
+</script>
+</body>
+</html>
